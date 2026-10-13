@@ -20,7 +20,6 @@
 //   (text color is passed separately as a 0xRRGGBB word, 0xFFFFFF default)
 
 #include <atomic>
-#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -45,63 +44,9 @@ namespace {
     uint64_t want_generation = 0; // bumped on any change, so update() only touches recompui on change
 }
 
-// --- Voice playback detection (event-driven subtitles) ------------------------------------------
-//
-// The runtime calls conker_on_rom_read (weak hook in librecomp/src/pi.cpp, added by
-// recomp/n64modernruntime.patch) for every ROM->RAM DMA. Conker's MP3 voices are streamed from
-// ROM; each time a new voice clip starts decoding, the game loads the MP3 decoder's work buffers
-// with two large reads (seen while testing: ~17408 and ~42000 bytes, from ROM ~0x13F7xxxx). Those
-// large reads are rare outside this, so a read of at least this size marks "a new voice line just
-// started". We count them; a mod reads the counter and advances its subtitle on each new event.
-// This keeps the subtitles synced to the actual voice, not a timer. The host holds no transcript or
-// per-line logic: it only counts voice-start events and draws what a mod asks for.
-namespace {
-    // Voice-clip tracking. Written only from conker_on_rom_read (which may run on the audio thread)
-    // with relaxed atomics; nothing else on that path (no timing calls, no locks).
-    //
-    // When a voice clip starts, the MP3 decoder loads its work buffers with two big reads (~17408 and
-    // ~42000 bytes). The next 2048-byte read is the clip's first MP3 frame block: its ROM address
-    // identifies the clip. While the clip plays, its MP3 is streamed in 2048-byte reads from just
-    // after that address; when they stop, the voice has ended.
-    std::atomic<bool> awaiting_clip = false;       // a decoder load was seen, clip address not yet
-    std::atomic<uint32_t> clip_addr = 0;           // ROM address of the clip playing (its MP3 start)
-    std::atomic<uint64_t> clip_count = 0;          // clips started so far
-    std::atomic<uint64_t> clip_activity = 0;       // streaming reads of the current clip so far
-
-    constexpr size_t decoder_load_min_size = 32768; // the ~42000-byte load, once per clip
-    constexpr size_t stream_read_size = 2048;
-    constexpr uint32_t clip_window = 0x40000;       // a clip's MP3 is well under 256 KB
-}
-
-// Weak hook defined in the runtime (pi.cpp): called on every ROM->RAM DMA. MUST stay minimal: it
-// runs on the game's audio/DMA thread in a hot path.
-extern "C" void conker_on_rom_read(uint32_t physical_addr, size_t num_bytes) {
-    if (num_bytes >= decoder_load_min_size) {
-        awaiting_clip.store(true, std::memory_order_relaxed);
-        return;
-    }
-    if (num_bytes != stream_read_size) {
-        return;
-    }
-    if (awaiting_clip.load(std::memory_order_relaxed)) {
-        awaiting_clip.store(false, std::memory_order_relaxed);
-        clip_addr.store(physical_addr, std::memory_order_relaxed);
-        clip_activity.fetch_add(1, std::memory_order_relaxed);
-        clip_count.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    const uint32_t start = clip_addr.load(std::memory_order_relaxed);
-    if (start != 0 && physical_addr >= start && physical_addr - start < clip_window) {
-        clip_activity.fetch_add(1, std::memory_order_relaxed);
-    }
-}
-
 // Exports (mod_api.cpp registers these). Declared here, defined below, so they can touch the state.
 extern "C" void recomp_subtitle_show(uint8_t* rdram, recomp_context* ctx);
 extern "C" void recomp_subtitle_hide(uint8_t* rdram, recomp_context* ctx);
-extern "C" void recomp_subtitle_voice_event(uint8_t* rdram, recomp_context* ctx);
-extern "C" void recomp_subtitle_voice_clip(uint8_t* rdram, recomp_context* ctx);
-extern "C" void recomp_subtitle_voice_activity(uint8_t* rdram, recomp_context* ctx);
 
 namespace {
     std::string read_mod_string(uint8_t* rdram, gpr address) {
@@ -143,27 +88,6 @@ extern "C" void recomp_subtitle_hide(uint8_t* rdram, recomp_context* ctx) {
         want_text.clear();
         want_generation++;
     }
-}
-
-// unsigned long recomp_subtitle_voice_event(void): returns how many voice-clip starts have been
-// detected so far. A mod reads this each frame; when it increases, a new line is being spoken.
-extern "C" void recomp_subtitle_voice_event(uint8_t* rdram, recomp_context* ctx) {
-    (void)rdram;
-    ctx->r2 = (gpr)(int64_t)(int32_t)(uint32_t)clip_count.load(std::memory_order_relaxed);
-}
-
-// unsigned long recomp_subtitle_voice_clip(void): ROM address of the voice clip playing now (its
-// first MP3 frame). Stable per recorded line, so a mod can key subtitles to it.
-extern "C" void recomp_subtitle_voice_clip(uint8_t* rdram, recomp_context* ctx) {
-    (void)rdram;
-    ctx->r2 = (gpr)(int64_t)(int32_t)clip_addr.load(std::memory_order_relaxed);
-}
-
-// unsigned long recomp_subtitle_voice_activity(void): counts the current clip's streaming reads.
-// While it keeps rising the voice is playing; when it stops, the voice has ended.
-extern "C" void recomp_subtitle_voice_activity(uint8_t* rdram, recomp_context* ctx) {
-    (void)rdram;
-    ctx->r2 = (gpr)(int64_t)(int32_t)(uint32_t)clip_activity.load(std::memory_order_relaxed);
 }
 
 #if defined(CONKER_RT64)

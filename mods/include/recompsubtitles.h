@@ -23,17 +23,6 @@
 RECOMP_IMPORT("*", void recomp_subtitle_show(const char* text, unsigned long style, unsigned long color_rgb));
 RECOMP_IMPORT("*", void recomp_subtitle_hide(void));
 
-// How many MP3 voice-clip starts the host has detected (host/src/subtitles.cpp). Read it each
-// frame; when it increases, a new voice line has started playing, so advance to the next subtitle.
-// This drives event-driven subtitles synced to the actual voice instead of a timer.
-RECOMP_IMPORT("*", unsigned long recomp_subtitle_voice_event(void));
-
-// ROM address of the voice clip playing now (its first MP3 frame): stable per recorded line.
-RECOMP_IMPORT("*", unsigned long recomp_subtitle_voice_clip(void));
-
-// Counts the current clip's streaming reads: rising while the voice plays, still once it ends.
-RECOMP_IMPORT("*", unsigned long recomp_subtitle_voice_activity(void));
-
 // Style helpers.
 #define SUBTITLE_POS_BOTTOM 0u
 #define SUBTITLE_POS_TOP    1u

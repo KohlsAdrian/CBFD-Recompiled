@@ -7,10 +7,10 @@ display_name = "Hollywood Subtitles"
 description = """
 Shows movie-style subtitles along the screen while characters speak, like a film. Conker's Bad Fur \
 Day is fully voice acted and draws no dialogue text, so the lines come from a transcript shipped \
-with the mod. This first version covers the intro (the chainsaw opening and Conker's throne-room \
-monologue) and the start of the campaign; more of the script follows. You can turn the intro and \
-the rest of the game on separately, hide the in-game speech bubbles so only the subtitles show, \
-and change where the text sits, its size, its color and its background."""
+with the mod, timed by the game's own voice playback. This first version covers the intro (the \
+chainsaw opening and Conker's throne-room monologue); more of the script follows. You can turn the \
+intro and the rest of the game on separately, and change where the text sits, its size, its color \
+and its background."""
 short_description = "Movie-style subtitles for the voice acting."
 authors = [ "Conker Recomp" ]
 game_id = "conker"
@@ -31,7 +31,7 @@ additional_files = [ "thumb.png" ]
 [[manifest.config_options]]
 id = "enabled"
 name = "Enable Subtitles"
-description = "The master switch. With this off, no subtitles show and the speech bubbles are left alone, whatever the options below say."
+description = "The master switch. With this off, no subtitles show, whatever the options below say."
 type = "Enum"
 options = [ "Off", "On" ]
 default = "On"
@@ -53,14 +53,6 @@ options = [ "Off", "On" ]
 default = "On"
 
 # --- Customization ------------------------------------------------------------------------------
-
-[[manifest.config_options]]
-id = "hide_bubbles"
-name = "Hide Speech Bubbles"
-description = "Hides the game's cutscene speech bubbles so only the subtitles show. Conker's thought-bubble tips are kept. (See the mod's README: which bubbles count is still being pinned down, so this is conservative by default.)"
-type = "Enum"
-options = [ "Off", "On" ]
-default = "On"
 
 [[manifest.config_options]]
 id = "position"
@@ -96,8 +88,8 @@ default = "White"
 
 [[manifest.config_options]]
 id = "debug_segments"
-name = "Debug: Voice Segments"
-description = "For tuning the subtitles: during the throne-room monologue, shows the number of the voice segment playing next to each line ([seg N]). The terminal logs every segment and line change either way."
+name = "Debug: Voice Clips"
+description = "For writing the subtitles: while a clip with subtitles plays, shows its ROM address and how far into it the voice is ([0x015E1FD8 12.34s]) before the line. The terminal logs each clip that starts either way, with or without subtitles for it."
 type = "Enum"
 options = [ "Off", "On" ]
 default = "Off"
