@@ -11,9 +11,9 @@ Covered so far:
 
 - **Chainsaw boot** (scene `0x21`): "Stupid logo!", "There, much better.", "How can… get it… Ah!",
   "Marvelous."
-- **Throne-room monologue** (scene `0x18`, the campaign intro): "Well. There I am. Conker the King…"
-  through "Come closer, and I'll tell you." The script's last lines ("It all started…" to "…a bad fur
-  day.") are in another recording, still to be found (see Status).
+- **Throne-room monologue** (scene `0x18`, the campaign intro), all of it: "Well. There I am. Conker the
+  King…" through "It's what I call… a bad fur day."
+
 
 ## Options (Mods menu)
 
@@ -46,10 +46,11 @@ The game's own code is untouched. Two parts:
    it plays.
 
 Measured on Windows: the throne monologue is one 38.8 s recording (ROM `0x015E1FD8`, 1,484 frames) in
-every run, with two pauses or none, and its speech lands where it was measured from the recording's
-own decoded audio. (The first version timed lines with the cutscene timer, 2 ticks a game frame. That
-falls behind the voice whenever the game draws fewer than 30 frames a second, which is why its lines
-drifted later in the monologue; its measured segment times were right.)
+every run, with two pauses or none. Its 20 speech segments were measured from its decoded audio in the
+game, and each one's words noted by ear from the game's own output, cut at them. (The first version
+decoded the recording offline past its end, to 55.75 s, and spread the speech over that, and timed lines
+with the cutscene timer, which falls behind the voice whenever the game draws fewer than 30 frames a
+second: its lines drifted later and later.)
 
 Two rules the code keeps:
 
@@ -68,10 +69,6 @@ Two rules the code keeps:
 
 ## Status / open questions
 
-- **The monologue's last lines** ("It all started… yesterday, and what a day that was! It's what I
-  like to call… a bad fur day.") aren't in the monologue's recording, which ends at 38.8 s. The first
-  version's offline decode read past its end into the data after it. The recording they're in needs
-  finding (the log names each recording as it starts).
 - **Hiding the speech bubbles** was dropped for now: it needs a way to tell speech bubbles from
   Conker's thought bubbles without hooking `func_15095D34`.
 - The game's lip-sync records (`L:` records in 220 of the 453 recordings, passed to a callback at

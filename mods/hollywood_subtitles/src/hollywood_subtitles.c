@@ -94,23 +94,36 @@ static const SubLine chainsaw_5[] = { { 0, WHOLE_CLIP, "There, much better." } }
 static const SubLine chainsaw_6[] = { { 0, WHOLE_CLIP, "How can... get it... Ah!" } };
 static const SubLine chainsaw_7[] = { { 0, WHOLE_CLIP, "Marvelous." } };
 
-// Conker's throne-room monologue (scene 0x18): one 38.8 s clip. The times are its speech segments,
-// measured from the clip's decoded audio (its loudness each MP3 frame, in the game); they match the ones
-// the first version measured offline to within 0.05 s. The script's last lines ("It all started...
-// yesterday, and what a day that was! It's what I like to call... a bad fur day.") aren't in this clip,
-// which ends at 38.8 s: they're in another one, still to be found and added.
+// Conker's throne-room monologue (scene 0x18): one 38.8 s clip, the whole speech, "Well." to "a bad fur day."
+// Its 20 speech segments (ms) were measured from the clip's decoded audio (its loudness each MP3 frame, in the
+// game), and each segment's words noted by ear from the game's own output, cut at them. (The first version
+// decoded the clip offline past its end, to 55.75 s, and spread the speech over that: its lines drifted later
+// and later.) The debug view numbers the segments ([seg N]).
+static const u32 throne_segments[][2] = {
+    {    50,   500 }, {  1520,  2320 }, {  3580,  5090 }, {  6030,  7990 }, {  8880,  9610 },
+    { 10920, 11990 }, { 12150, 12770 }, { 13900, 17580 }, { 18130, 19070 }, { 20530, 20950 },
+    { 21890, 23040 }, { 23850, 24500 }, { 24890, 25470 }, { 26830, 28060 }, { 28810, 29360 },
+    { 29990, 31190 }, { 32080, 33310 }, { 34040, 34270 }, { 34530, 35110 }, { 35660, 36410 },
+};
+
+// Each line from its first segment's start; it stays up until just before the next line (or, with a long
+// pause after it, a moment past its last segment), so the short ones can be read.
 static const SubLine throne[] = {
-    {     50,   550, "Well." },
-    {   1520,  2400, "There I am." },
-    {   3580,  5150, "Conker the King." },
-    {   6030,  8050, "King of all the land." },
-    {   8880, 12800, "Who'd a thought that?" },
-    {  13900, 17600, "But how did I come to this," },
-    {  18130, 19100, "I hear you say." },
-    {  20530, 29400, "And who are those strange fellows that surround my throne," },
-    {  29990, 31250, "I hear you also say." },
-    {  32080, 33400, "It's a long story." },
-    {  34040, 36450, "Come closer, and I'll tell you." },
+    {     50,  1450, "Well." },                                                     // segment 1
+    {   1520,  3450, "There I am." },                                               // 2
+    {   3580,  5900, "Conker the King." },                                          // 3
+    {   6030,  8750, "King of all the land." },                                     // 4
+    {   8880, 10800, "Who'd have thought that?" },                                  // 5
+    {  10920, 12100, "But how did I come to this," },                               // 6
+    {  12150, 13750, "I hear you say." },                                           // 7
+    {  13900, 18050, "And who are those strange fellows who surround my throne," },  // 8
+    {  18130, 20000, "I hear you also say." },                                      // 9
+    {  20530, 23750, "Well, it's a long story." },                                  // 10-11
+    {  23850, 26400, "Come closer, and I'll tell you." },                           // 12-13
+    {  26830, 29900, "It all started... yesterday," },                              // 14-15
+    {  29990, 31950, "and what a day that was!" },                                  // 16
+    {  32080, 33950, "It's what I call..." },                                       // 17
+    {  34040, 37400, "a bad fur day." },                                            // 18-20
 };
 
 #define LINES(a) a, (int)(sizeof(a) / sizeof(a[0]))
@@ -135,15 +148,17 @@ static const SubClip* find_clip(u32 rom) {
     return 0;
 }
 
-// The text that holds this time in the clip (with its tail), or 0.
+// The text that holds this time in the clip (with its tail), or 0. Where a line's tail runs into the next line,
+// the later one (the one that has started) wins, so a new line is never held back.
 static const char* text_at(const SubClip* clip, u32 ms) {
+    const char* text = 0;
     for (int i = 0; i < clip->count; i++) {
         const SubLine* line = &clip->lines[i];
         if (line->end_ms == WHOLE_CLIP || (ms >= line->start_ms && ms < line->end_ms + LINE_TAIL_MS)) {
-            return line->text;
+            text = line->text;
         }
     }
-    return 0;
+    return text;
 }
 
 // --- Options --------------------------------------------------------------------------------------
@@ -234,10 +249,25 @@ RECOMP_HOOK_RETURN("func_1501BBB8") void hollywood_on_frame(void) {
         text = text_at(clip, ms);
     }
 
-    // The debug view while a known clip plays: its address and time, then the line (if any).
-    if (opt("enabled") && opt("debug_segments") && clip != 0 && !stopped) {
+    // The debug view while any clip plays (with lines or not): its address and time, the measured speech
+    // segment it's in (the throne monologue's), then the line (if any).
+    if (opt("enabled") && opt("debug_segments") && serial != 0 && !stopped) {
         static char buf[160];
         int i = debug_prefix(buf, (int)sizeof(buf), rom, ms);
+        if (rom == 0x015E1FD8) {
+            for (int s = 0; s < (int)(sizeof(throne_segments) / sizeof(throne_segments[0])); s++) {
+                if (ms >= throne_segments[s][0] && ms < throne_segments[s][1] && i < (int)sizeof(buf) - 10) {
+                    const int n = s + 1;
+                    const char* p = "[seg ";
+                    while (*p) buf[i++] = *p++;
+                    if (n >= 10) buf[i++] = (char)('0' + n / 10);
+                    buf[i++] = (char)('0' + n % 10);
+                    buf[i++] = ']';
+                    buf[i++] = ' ';
+                    break;
+                }
+            }
+        }
         for (const char* t = text ? text : ""; *t && i < (int)sizeof(buf) - 1; t++) buf[i++] = *t;
         buf[i] = '\0';
         recomp_subtitle_show(buf, build_style(), text_color());
