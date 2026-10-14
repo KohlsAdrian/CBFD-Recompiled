@@ -86,6 +86,16 @@ extern "C" void recomp_printf(uint8_t* rdram, recomp_context* ctx) {
 extern "C" void recomp_subtitle_show(uint8_t* rdram, recomp_context* ctx);
 extern "C" void recomp_subtitle_hide(uint8_t* rdram, recomp_context* ctx);
 
+// The voice-clip probe's export (defined in host/src/voice_probe.cpp, extern "C"). Dev-only logging:
+// the mod hands each finished voice clip over and the host appends it to voice_segments.txt.
+extern "C" void recomp_voice_log_clip(uint8_t* rdram, recomp_context* ctx);
+extern "C" void recomp_voice_log_dialog(uint8_t* rdram, recomp_context* ctx);
+extern "C" void recomp_voice_dialog_done(uint8_t* rdram, recomp_context* ctx);
+// Auto-play resume: the mod saves/loads/clears the next dialogue index so a run survives a crash.
+extern "C" void recomp_voice_nav_save(uint8_t* rdram, recomp_context* ctx);
+extern "C" void recomp_voice_nav_load(uint8_t* rdram, recomp_context* ctx);
+extern "C" void recomp_voice_nav_clear(uint8_t* rdram, recomp_context* ctx);
+
 void conker::register_mod_exports() {
     recomp::overlays::register_base_export("recomp_printf", recomp_printf);
 
@@ -93,4 +103,14 @@ void conker::register_mod_exports() {
     // style it chooses. The host holds no subtitle logic; it only renders what the mod asks for.
     recomp::overlays::register_base_export("recomp_subtitle_show", recomp_subtitle_show);
     recomp::overlays::register_base_export("recomp_subtitle_hide", recomp_subtitle_hide);
+
+    // The voice-clip probe (host/src/voice_probe.cpp): dev-only, for building the transcript. A mod
+    // logs each finished voice clip (scene, ROM address, order, duration) to voice_segments.txt, and
+    // saves/loads its auto-navigate progress so a capture run resumes past a scene that froze the game.
+    recomp::overlays::register_base_export("recomp_voice_log_clip", recomp_voice_log_clip);
+    recomp::overlays::register_base_export("recomp_voice_log_dialog", recomp_voice_log_dialog);
+    recomp::overlays::register_base_export("recomp_voice_dialog_done", recomp_voice_dialog_done);
+    recomp::overlays::register_base_export("recomp_voice_nav_save", recomp_voice_nav_save);
+    recomp::overlays::register_base_export("recomp_voice_nav_load", recomp_voice_nav_load);
+    recomp::overlays::register_base_export("recomp_voice_nav_clear", recomp_voice_nav_clear);
 }

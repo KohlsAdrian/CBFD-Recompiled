@@ -31,6 +31,7 @@
 #include "recomputils.h"
 #include "recompconfig.h"
 #include "recompsubtitles.h"
+#include "recompvoiceprobe.h"
 
 // --- The voice player (read-only) -----------------------------------------------------------------
 
@@ -38,6 +39,64 @@
 #define g_mp3_state (*(volatile u32*)0x800E0E04)
 #define MP3_IDLE 0
 #define MP3_STOPPED 3
+
+// The game's current scene number (D_800BE9F0), the same numbering the script bank and the Chapters
+// menu use. Read each game frame (read-only), to tag logged voice clips with the scene they played in.
+#define g_scene_number (*(volatile u32*)0x800BE9F0)
+
+// --- Dialogue auto-play (dev-only) ----------------------------------------------------------------
+//
+// Teleports straight to each dialogue instead of playing to it. Every conversation in the game is a
+// scene script (bank 6: scene N's script S, the [S.T] blocks extract_bubble_text.py writes), and the
+// game starts one with func_1501D348(scene, script, slot, 0, 0) — what its own trigger zones and the
+// Chapters menu call (game_20AE20.c: func_1501D348(*entry, script, 0, 0, 0)). When the scene isn't the
+// one in play, func_1501D348 loads it first (func_1501C730(1, scene, ...)) and, once it's in, plays the
+// script (func_150082CC). So no save progress or walking is needed: the run asks for every script in
+// dialog_list.h (all 483 in the bank, generated from the ROM by make_dialog_list.py) one after another.
+void func_1501D348(s32 scene, s32 script, s32 slot, s32 arg3, s32 arg4);
+#include "dialog_list.h"
+
+// The scene loader (Skip Intro jumps to the bar with func_1501C730(6, 0x1D, 0, 0, 1)): auto-play loads
+// a dialogue's scene with it when that scene isn't in play, then starts the script in it.
+void func_1501C730(s32 kind, s32 scene, u32 arg2, s32 arg3, s32 arg4);
+
+// The buttons pressed this frame, player 1 (func_1501BBB8 sets it; the Skip Any Cutscene mod reads L
+// there). Auto-play sets L after func_1501BBB8 returns to end a cutscene that has stalled.
+#define g_buttons_pressed (*(volatile u16*)0x800BE710)
+#define BUTTON_L 0x0020
+#define BUTTON_B 0x4000 // advances a speech bubble ("press [B]")
+
+// The cutscene system's state, slot 0 (game_49D30.c; the Skip Any Cutscene mod reads the same):
+//   cutscene_state  0 none, 1 playing, 2 starting after a scene load (D_800C35EA)
+//   cutscene_script the script id playing (D_800C35E8)
+//   cutscene_timer  its clock, 2 ticks a game frame (D_800C35B0), toward cutscene_length (D_800C3640)
+//   cutscene_pending a request waiting for its scene to load (D_800C35C4, script + 1)
+#define cutscene_state   (*(volatile u8*)0x800C35EA)
+#define cutscene_script  (*(volatile u8*)0x800C35E8)
+#define cutscene_timer   (*(volatile s32*)0x800C35B0)
+#define cutscene_length  (*(volatile s32*)0x800C3640)
+#define cutscene_pending (*(volatile u8*)0x800C35C4)
+// Nonzero while the game fades out a cutscene that's being skipped (func_1501E1B4 sets it when L is
+// accepted): tells a dialogue skipped by hand from one that played to its end.
+#define cutscene_skipping (*(volatile u8*)0x800C3C88)
+#define CUTSCENE_PLAYING 1
+
+// Dialogues known to crash or hang when teleported to: skipped without asking. Empty until a run finds
+// one (the run's log says which dialogue it was on, and a relaunch resumes past it anyway).
+static const u8 dialog_skip[][2] = {
+    { 0xFF, 0xFF }, // placeholder (no scene 0xFF): add { scene, script } pairs here
+};
+#define DIALOG_SKIP_COUNT ((int)(sizeof(dialog_skip) / sizeof(dialog_skip[0])))
+
+static int dialog_is_skipped(u32 scene, u32 script) {
+    for (int i = 0; i < DIALOG_SKIP_COUNT; i++) {
+        if (dialog_skip[i][0] == scene && dialog_skip[i][1] == script) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 
 // Set by the hooks below (audio thread), read each game frame.
 static volatile u32 clip_rom = 0;     // the clip's ROM address, as the game passes it to mp3_play_file
@@ -220,15 +279,71 @@ static int debug_prefix(char* buf, int size, u32 rom, u32 ms) {
     return i;
 }
 
+// --- Hide Speech Bubbles -------------------------------------------------------------------------
+//
+// func_1516B6BC draws a speech bubble (its pieces through func_15095A48 -> func_15095D34, and its
+// text): it takes the display list in $a0 and returns its new end in $v0, like the game's other
+// drawers. func_15095D34 itself is hooked by the host (widescreen bubbles, the sprite size crash
+// fix), and a mod's hook there would replace those; this hooks the bubble drawer above it instead,
+// so the host's hooks still run. With the option on, everything the drawer wrote between entry and
+// return is turned into no-ops (G_NOOP, 0), so the bubble isn't drawn and the subtitle takes its
+// place. The game still runs the bubble (its timing, waiting for B) exactly as before.
+// Found by reading the recompiled call chain (func_15095D34 <- func_15095A90 <- func_15095A48 <-
+// func_1516B6BC, 15 pieces and 11 text calls); whether it also draws Conker's thought bubbles is
+// still to be seen in game.
+
+static int hide_bubbles = 0;            // the option, read once a game frame
+static volatile u32 bubble_dl_start = 0; // where the bubble drawer started writing
+
+RECOMP_HOOK("func_1516B6BC") void hollywood_bubble_begin(u32 dl) {
+    bubble_dl_start = dl;
+}
+
+RECOMP_HOOK_RETURN("func_1516B6BC") void hollywood_bubble_end(void) {
+    const u32 start = bubble_dl_start;
+    bubble_dl_start = 0;
+    if (!hide_bubbles || start == 0) {
+        return;
+    }
+    const u32 end = recomphook_get_return_u32();
+    // A sane range only (a bubble is a few dozen commands): never touch anything else.
+    if (end <= start || end - start > 0x2000 || ((end - start) & 7) != 0) {
+        return;
+    }
+    for (u32 at = start; at < end; at += 4) {
+        *(volatile u32*)at = 0; // G_NOOP
+    }
+}
+
 // --- Each game frame ------------------------------------------------------------------------------
 
 // func_1501BBB8 runs once per game frame (it reads the controllers).
 RECOMP_HOOK_RETURN("func_1501BBB8") void hollywood_on_frame(void) {
+    hide_bubbles = opt("enabled") && opt("hide_bubbles");
     static const char* shown = 0;   // the line up now (0: none)
     static int debug_shown = 0;     // the debug view is up
     static u32 seen_serial = 0;     // the last clip logged
     static u32 tail = 0;            // game frames since the clip stopped
 
+    // --- Capture (dev-only): log each finished voice clip to the host (voice_segments.txt) ---------
+    // The audio-thread hooks reset clip_frames when a new clip starts, so the previous clip's length is
+    // gone by then: snapshot the running clip's frame count and ROM here, every frame, and when a clip
+    // ends (a new one starts, or playback has been stopped a while) hand the finished one to the host.
+    // Each clip is tagged with the cutscene script playing when it started (0xFF: none) and the
+    // cutscene clock then, so the matcher knows exactly which dialogue it belongs to and when in it.
+    static u32 cap_serial = 0;      // the serial of the clip being measured now (0: none)
+    static u32 cap_rom = 0;         // its ROM address
+    static u32 cap_frames = 0;      // the most frames seen for it (its length)
+    static u32 cap_scene = 0;       // the scene it played in (snapshotted at its start)
+    static u32 cap_script = 0xFF;   // the cutscene script playing at its start (0xFF: none)
+    static s32 cap_tick = -1;       // the cutscene clock at its start (-1: no cutscene)
+    static u32 cap_order = 0;       // its position within that (scene, script), from 1
+    static u32 cap_logged = 0;      // the serial last logged (so a clip is logged once)
+    static u32 cap_key = 0xFFFFFFFFu; // the (scene, script) the order counter is counting within
+
+    const u32 cap_on = opt("enabled") && (opt("capture") || opt("navigate"));
+
+    // --- The subtitle logic (unchanged below) -----------------------------------------------------
     const u32 serial = clip_serial;
     const u32 rom = clip_rom;
     const u32 ms = clip_ms();
@@ -236,12 +351,285 @@ RECOMP_HOOK_RETURN("func_1501BBB8") void hollywood_on_frame(void) {
     const int stopped = state == MP3_IDLE || state == MP3_STOPPED;
     const SubClip* clip = find_clip(rom);
 
+    if (cap_on) {
+        // A clip just started (serial changed): finalize the one we were measuring, then begin the new.
+        if (serial != cap_serial) {
+            if (cap_serial != 0 && cap_serial != cap_logged && cap_frames != 0) {
+                recomp_voice_log_clip(cap_scene, cap_script, cap_rom, cap_order,
+                    (cap_frames * 1280u) / 49u, cap_serial, cap_tick);
+                cap_logged = cap_serial;
+            }
+            // Begin measuring the new clip. Count its order within the (scene, script) it starts in.
+            const u32 scene = g_scene_number;
+            const int in_cutscene = cutscene_state == CUTSCENE_PLAYING;
+            const u32 script = in_cutscene ? cutscene_script : 0xFF;
+            const u32 key = (scene << 8) | script;
+            if (key != cap_key) {
+                cap_key = key;
+                cap_order = 0;
+            }
+            cap_order++;
+            cap_serial = serial;
+            cap_rom = rom;
+            cap_scene = scene;
+            cap_script = script;
+            cap_tick = in_cutscene ? cutscene_timer : -1;
+            cap_frames = clip_frames;
+        } else if (serial != 0) {
+            // Still the same clip: keep its largest frame count (it only grows while playing).
+            const u32 frames = clip_frames;
+            if (frames > cap_frames) {
+                cap_frames = frames;
+            }
+            // Once it has been stopped a while, finalize it (its last clip in a scene has no successor
+            // to trigger the serial-change path above).
+            if (stopped && tail >= CLIP_TAIL_FRAMES && cap_serial != cap_logged && cap_frames != 0) {
+                recomp_voice_log_clip(cap_scene, cap_script, cap_rom, cap_order,
+                    (cap_frames * 1280u) / 49u, cap_serial, cap_tick);
+                cap_logged = cap_serial;
+            }
+        }
+    }
+
     if (serial != seen_serial) {
         seen_serial = serial;
         tail = 0;
         recomp_printf("[hollywood_subtitles] clip 0x%08X starts%s\n", (unsigned)rom, clip ? "" : " (no lines for it)");
     }
     tail = stopped ? tail + 1 : 0;
+
+    // --- Dialogue auto-play (dev-only): teleport to every dialogue in the game, one after another ----
+    // With this on, the mod plays each script in dialog_list.h (all of the game's scene scripts) and
+    // logs what happens: the script starting, every voice clip it plays (tagged with the script and its
+    // clock, through the capture above), and how it ended. No walking and no save progress: for each
+    // dialogue it loads the scene if it isn't in play (func_1501C730(6, scene, ...), the loader Skip
+    // Intro uses), then starts the script with func_1501D348(scene, script, 0, 0, 0) — the game's own
+    // "play this script", which in the scene in play starts it at once, whatever the trigger zones.
+    //
+    // It never presses B through speech bubbles (that would slow the run, and a bubble's text is in the
+    // ROM anyway). A dialogue that falls silent for a while is logged as "stalled" and ended with L (as
+    // the Skip Any Cutscene mod allows, which must be on), so the next one can start. Before each one the
+    // next index is saved: if a dialogue crashes the game, relaunching carries on past it.
+    {
+        enum {
+            DLG_LOAD_TIMEOUT  = 900,  // ~30 s for a scene to load
+            DLG_LOAD_SETTLE   = 45,   // ~1.5 s in a freshly loaded scene before starting a script
+            DLG_START_TIMEOUT = 150,  // ~5 s for a requested script to start
+            DLG_FROZEN_FRAMES = 45,   // ~1.5 s with the cutscene clock stopped (and no voice): it waits for B
+            DLG_MAX_TAPS      = 40,   // B taps without the dialogue ending: give up and end it with L
+            DLG_MAX_FRAMES    = 5400, // ~3 min hard cap per dialogue
+            DLG_CLEAR_TIMEOUT = 300,  // ~10 s pressing L to end a cutscene, else reload the scene
+            DLG_SETTLE_FRAMES = 15,   // a breather between dialogues
+        };
+        enum { DLG_OFF, DLG_WAIT_BOOT, DLG_NEXT, DLG_LOAD, DLG_WAIT_START, DLG_PLAYING, DLG_CLEAR, DLG_SKIP, DLG_SETTLE };
+        static int dlg_phase = DLG_OFF;
+        static int dlg_index = 0;      // the dialog_list entry we're on
+        static u32 dlg_frames = 0;     // frames in the current phase
+        static u32 dlg_serial0 = 0;    // the clip serial when the dialogue started (clips = serial - this)
+        static int dlg_loaded = 0;     // the scene being loaded is in play (settling)
+        static int dlg_reload = 0;     // a cutscene couldn't be ended: reload the scene to clear it
+        static int dlg_loads = 0;      // loads tried for the current dialogue (a scene that won't stay)
+        static s32 dlg_last_tick = 0;  // the cutscene clock last frame
+        static u32 dlg_frozen = 0;     // frames the clock hasn't moved (and no voice)
+        static u32 dlg_taps = 0;       // B taps in the current dialogue
+        static int dlg_skipped = 0;    // the dialogue was skipped (by hand, or its clock jumped to the end)
+        static int dlg_loads_for = -1; // the dialogue index dlg_loads counts for
+
+        const int dlg_on = opt("enabled") && opt("navigate");
+
+        if (!dlg_on) {
+            dlg_phase = DLG_OFF;
+        } else if (dlg_phase == DLG_OFF) {
+            dlg_index = (int)recomp_voice_nav_load();
+            if (dlg_index < 0 || dlg_index >= DIALOG_COUNT) {
+                dlg_index = 0;
+            }
+            if (dlg_index != 0) {
+                recomp_voice_log_dialog(VOICE_DIALOG_RESUME, 0, 0, (unsigned long)dlg_index, 0);
+            }
+            recomp_printf("[hollywood_subtitles] auto-play: %d dialogues, starting at %d\n", DIALOG_COUNT, dlg_index + 1);
+            dlg_phase = DLG_WAIT_BOOT;
+        } else if (dlg_phase == DLG_WAIT_BOOT) {
+            // Let the boot finish (the logos, scene 0x25, and the chainsaw opening, 0x21) before driving.
+            if (g_scene_number != 0x25 && g_scene_number != 0x21) {
+                dlg_phase = DLG_NEXT;
+            }
+        } else if (dlg_phase == DLG_NEXT) {
+            if (dlg_index >= DIALOG_COUNT) {
+                recomp_printf("[hollywood_subtitles] auto-play: done, %d dialogues\n", DIALOG_COUNT);
+                recomp_voice_log_dialog(VOICE_DIALOG_DONE, 0, 0, (unsigned long)DIALOG_COUNT, 0);
+                recomp_voice_nav_clear();
+                dlg_index = DIALOG_COUNT;
+                dlg_phase = DLG_SETTLE; // stays idle at the end (turn the option off to reset)
+                dlg_frames = 0;
+            } else {
+                const u32 scene = dialog_list[dlg_index][0];
+                const u32 script = dialog_list[dlg_index][1];
+                if (dialog_is_skipped(scene, script) ||
+                    (opt("navigate_skip_done") && recomp_voice_dialog_done(scene, script))) {
+                    dlg_index++; // blacklisted, or already captured to its end in an earlier run
+                } else if ((dlg_reload || g_scene_number != scene) &&
+                           (dlg_loads_for == dlg_index ? dlg_loads : 0) >= 3) {
+                    // Loaded three times and it still isn't in play (the game moves on from it): skip.
+                    recomp_printf("[hollywood_subtitles] auto-play: scene 0x%02X won't stay loaded, skipping\n",
+                        (unsigned)scene);
+                    recomp_voice_log_dialog(VOICE_DIALOG_NOSTART, scene, script, 0, 3);
+                    dlg_reload = 0;
+                    dlg_index++;
+                } else if (dlg_reload || g_scene_number != scene) {
+                    // Load the dialogue's scene (or reload it, to clear a cutscene L couldn't end).
+                    if (dlg_loads_for != dlg_index) {
+                        dlg_loads_for = dlg_index;
+                        dlg_loads = 0;
+                    }
+                    dlg_loads++;
+                    recomp_voice_nav_save((unsigned long)(dlg_index + 1)); // a crash here resumes past it
+                    recomp_printf("[hollywood_subtitles] auto-play: loading scene 0x%02X\n", (unsigned)scene);
+                    func_1501C730(6, (s32)scene, 0, 0, 1);
+                    dlg_reload = 0;
+                    dlg_loaded = 0;
+                    dlg_frames = 0;
+                    dlg_phase = DLG_LOAD;
+                } else if (cutscene_state == CUTSCENE_PLAYING) {
+                    // Something is playing (the scene's own opening cutscene, say): it's captured as it
+                    // plays; once it's silent a while, end it so ours can start.
+                    dlg_frames = 0;
+                    dlg_last_tick = cutscene_timer;
+                    dlg_frozen = 0;
+                    dlg_taps = 0;
+                    dlg_skipped = 0;
+                    dlg_serial0 = serial;
+                    dlg_phase = DLG_CLEAR;
+                } else if (cutscene_pending == 0) {
+                    recomp_voice_nav_save((unsigned long)(dlg_index + 1));
+                    recomp_voice_log_dialog(VOICE_DIALOG_START, scene, script,
+                        dialog_list[dlg_index][2], (unsigned long)dlg_index);
+                    recomp_printf("[hollywood_subtitles] auto-play %d/%d: scene 0x%02X script %u%s\n",
+                        dlg_index + 1, DIALOG_COUNT, (unsigned)scene, (unsigned)script,
+                        dialog_list[dlg_index][2] ? "" : " (no bubble text)");
+                    func_1501D348((s32)scene, (s32)script, 0, 0, 0);
+                    dlg_frames = 0;
+                    dlg_phase = DLG_WAIT_START;
+                }
+            }
+        } else if (dlg_phase == DLG_LOAD) {
+            const u32 scene = dialog_list[dlg_index][0];
+            dlg_frames++;
+            if (!dlg_loaded && g_scene_number == scene) {
+                dlg_loaded = 1;
+                dlg_frames = 0;
+            } else if (dlg_loaded && dlg_frames >= DLG_LOAD_SETTLE) {
+                dlg_phase = DLG_NEXT;
+            } else if (!dlg_loaded && dlg_frames >= DLG_LOAD_TIMEOUT) {
+                recomp_printf("[hollywood_subtitles] auto-play: scene 0x%02X did not load\n", (unsigned)scene);
+                recomp_voice_log_dialog(VOICE_DIALOG_NOSTART, scene, dialog_list[dlg_index][1], dlg_frames, 0);
+                dlg_index++;
+                dlg_phase = DLG_NEXT;
+            }
+        } else if (dlg_phase == DLG_WAIT_START) {
+            const u32 scene = dialog_list[dlg_index][0];
+            const u32 script = dialog_list[dlg_index][1];
+            dlg_frames++;
+            if (cutscene_state == CUTSCENE_PLAYING && cutscene_script == script && g_scene_number == scene) {
+                dlg_phase = DLG_PLAYING;
+                dlg_frames = 0;
+                dlg_serial0 = serial;
+                dlg_last_tick = cutscene_timer;
+                dlg_frozen = 0;
+                dlg_taps = 0;
+                dlg_skipped = 0;
+            } else if (dlg_frames >= DLG_START_TIMEOUT) {
+                recomp_printf("[hollywood_subtitles] auto-play: scene 0x%02X script %u did not start\n",
+                    (unsigned)scene, (unsigned)script);
+                recomp_voice_log_dialog(VOICE_DIALOG_NOSTART, scene, script, dlg_frames, 0);
+                dlg_index++;
+                dlg_frames = 0;
+                dlg_phase = DLG_SETTLE;
+            }
+        } else if (dlg_phase == DLG_PLAYING || dlg_phase == DLG_CLEAR) {
+            // Let the cutscene run to its own end, however long, voiced or not: while its clock (2 ticks
+            // a frame) moves, it is animating (a camera move, a cow, liquid draining...), so just wait.
+            // Only when the clock has stopped and nothing is speaking is it waiting for input (a speech
+            // bubble's "press B"): tap B once, which moves the dialogue on and lets its next lines play,
+            // so they're captured too. If taps stop helping (or the cap is hit), end it with L.
+            // DLG_CLEAR is the same for a cutscene that was already playing (the scene's own opening):
+            // it's captured as it plays, then the next dialogue starts.
+            const int voice_now = (serial != 0) && !stopped;
+            const s32 tick = cutscene_timer;
+            const int playing_ours = dlg_phase == DLG_PLAYING;
+            const u32 scene = dialog_list[dlg_index < DIALOG_COUNT ? dlg_index : 0][0];
+            const u32 script = dialog_list[dlg_index < DIALOG_COUNT ? dlg_index : 0][1];
+            const u32 clips = serial - dlg_serial0;
+            dlg_frames++;
+            // A skip: the game's skip fade is running, or the clock leapt to the end (a skip sets it to the
+            // cutscene's length at once; playing, it moves a few ticks a frame).
+            if (cutscene_skipping != 0 || tick - dlg_last_tick > 60) {
+                dlg_skipped = 1;
+            }
+            if (tick != dlg_last_tick || voice_now) {
+                dlg_frozen = 0;
+            } else {
+                dlg_frozen++;
+            }
+            dlg_last_tick = tick;
+
+            int event = -1;
+            if (cutscene_state != CUTSCENE_PLAYING || (playing_ours && cutscene_script != script)) {
+                event = VOICE_DIALOG_END;
+            } else if (dlg_frames >= DLG_MAX_FRAMES) {
+                event = VOICE_DIALOG_CAP;
+            } else if (dlg_taps >= DLG_MAX_TAPS) {
+                event = VOICE_DIALOG_STALLED;
+            } else if (dlg_frozen >= DLG_FROZEN_FRAMES) {
+                g_buttons_pressed = (u16)(g_buttons_pressed | BUTTON_B); // one frame: advance the bubble
+                dlg_taps++;
+                dlg_frozen = 0;
+            }
+
+            if (event == VOICE_DIALOG_END) {
+                if (playing_ours) {
+                    recomp_printf("[hollywood_subtitles] auto-play: scene 0x%02X script %u %s (%u clips, %u B taps)\n",
+                        (unsigned)scene, (unsigned)script, dlg_skipped ? "skipped" : "ended",
+                        (unsigned)clips, (unsigned)dlg_taps);
+                    recomp_voice_log_dialog(dlg_skipped ? VOICE_DIALOG_SKIPPED : VOICE_DIALOG_END,
+                        scene, script, (u32)(dlg_last_tick > 0 ? dlg_last_tick : 0), clips);
+                    dlg_index++;
+                }
+                dlg_frames = 0;
+                dlg_phase = DLG_SETTLE;
+            } else if (event >= 0) {
+                // Stuck: log it (ours only) and end it with L; if even L doesn't end it, reload the scene.
+                if (playing_ours) {
+                    recomp_printf("[hollywood_subtitles] auto-play: scene 0x%02X script %u %s (%u clips, %u B taps), ending it\n",
+                        (unsigned)scene, (unsigned)script, event == VOICE_DIALOG_CAP ? "hit the cap" : "stalled",
+                        (unsigned)clips, (unsigned)dlg_taps);
+                    recomp_voice_log_dialog((unsigned long)event, scene, script, (u32)(tick > 0 ? tick : 0), clips);
+                    dlg_index++;
+                }
+                dlg_frames = 0;
+                dlg_phase = DLG_SKIP;
+            }
+        } else if (dlg_phase == DLG_SKIP) {
+            // End a stuck cutscene with L (it skips a cutscene; Skip Any Cutscene lets it skip ones never
+            // watched). If it still won't end, reload the scene to clear it.
+            dlg_frames++;
+            if (cutscene_state != CUTSCENE_PLAYING) {
+                dlg_frames = 0;
+                dlg_phase = DLG_SETTLE;
+            } else if (dlg_frames >= DLG_CLEAR_TIMEOUT) {
+                recomp_printf("[hollywood_subtitles] auto-play: a cutscene won't end, reloading the scene\n");
+                dlg_reload = 1;
+                dlg_frames = 0;
+                dlg_phase = DLG_SETTLE;
+            } else {
+                g_buttons_pressed = (u16)(g_buttons_pressed | BUTTON_L);
+            }
+        } else if (dlg_phase == DLG_SETTLE) {
+            if (dlg_index < DIALOG_COUNT && ++dlg_frames >= DLG_SETTLE_FRAMES) {
+                dlg_phase = DLG_NEXT;
+            }
+        }
+    }
 
     const char* text = 0;
     if (opt("enabled") && clip != 0 && (clip->is_intro ? opt("intro_subtitles") : opt("general_subtitles")) != 0 &&

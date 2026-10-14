@@ -52,6 +52,14 @@ type = "Enum"
 options = [ "Off", "On" ]
 default = "On"
 
+[[manifest.config_options]]
+id = "hide_bubbles"
+name = "Hide Speech Bubbles"
+description = "Don't draw the game's comic speech bubbles, so the subtitles replace them. The dialogue still plays exactly as before (it still waits for B where the game does). Lines that have no subtitle yet show no text at all with this on."
+type = "Enum"
+options = [ "Off", "On" ]
+default = "On"
+
 # --- Customization ------------------------------------------------------------------------------
 
 [[manifest.config_options]]
@@ -93,3 +101,27 @@ description = "For writing the subtitles: while a clip with subtitles plays, sho
 type = "Enum"
 options = [ "Off", "On" ]
 default = "Off"
+
+[[manifest.config_options]]
+id = "capture"
+name = "Dev: Capture Voice Clips to File"
+description = "For building the transcript: logs every voice clip that plays (its scene, ROM address, order and length) to voice_segments.txt in the game's data folder, so an offline tool can pair them with the game's speech-bubble text. Leave Off for normal play."
+type = "Enum"
+options = [ "Off", "On" ]
+default = "Off"
+
+[[manifest.config_options]]
+id = "navigate"
+name = "Dev: Auto Play All Dialogues"
+description = "For building the transcript: teleports straight to every dialogue in the game (all 483 scene scripts, no save progress needed), plays each and logs its voice clips, timings and how it ended to voice_segments.txt in the game's data folder. It doesn't press B through speech bubbles; a dialogue that stalls is ended with L (keep Skip Any Cutscene on). If a dialogue crashes the game, relaunch: it resumes past it. Leave Off for normal play."
+type = "Enum"
+options = [ "Off", "On" ]
+default = "Off"
+
+[[manifest.config_options]]
+id = "navigate_skip_done"
+name = "Dev: Auto Play Skips Captured Dialogues"
+description = "With Auto Play All Dialogues: pass over the dialogues voice_segments.txt already has played to their end, so a capture can be collected over several sittings without replaying (or skipping by hand) what's done. Dialogues that were skipped or stalled are played again."
+type = "Enum"
+options = [ "Off", "On" ]
+default = "On"
